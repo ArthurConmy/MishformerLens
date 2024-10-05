@@ -1,0 +1,9 @@
+[project]
+name = "mishformer_lens"
+version = "0.0"  # TODO(v0.1)  # TODO(v1)
+description = "MishformerLens pre-release dev"
+requires-python = ">=3.10"  # TODO(v1): submit changes to Mishax so we can support 3.7 like TransformerLens
+
+[build-system]
+requires = ["setuptools>=61.0"]  # TODO(v0.1): mishax, transformer_lens and transformers should be pinned here
+build-backend = "setuptools.build_meta"
