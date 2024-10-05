@@ -28,6 +28,11 @@ import jaxtyping
 from jaxtyping import Float, Int
 from mishax import ast_patcher
 
+if "patcher" in globals():
+    print("Unpatching...")
+    patcher.__exit__(None, None, None)
+    del patcher
+
 # Apply patches now:
 patcher = ast_patcher.ModuleASTPatcher(
     transformers.models.gpt2.modeling_gpt2,
@@ -68,6 +73,38 @@ self.ln_f.hook_normalized = HookPoint()
         (
             """hidden_states = self.ln_f(hidden_states)""",
             """hidden_states = self.ln_f.hook_normalized(self.ln_f(hidden_states))""",
+        ),
+    ],
+    GPT2SdpaAttention=[
+        # Add hook points in __init__
+        (
+            """super().__init__(*args, **kwargs)""",
+            """super().__init__(*args, **kwargs)
+self.hook_q = HookPoint()
+self.hook_k = HookPoint()
+self.hook_v = HookPoint()
+self.hook_z = HookPoint()
+self.hook_attn_scores = HookPoint()
+self.hook_pattern = HookPoint()
+self.hook_result = HookPoint()
+print("GPT2SdpaAttention")
+""",
+        ),
+        # In forward, wrap q, k, v with hooks
+        (
+            """query = self._split_heads(query, self.num_heads, self.head_dim)
+key = self._split_heads(key, self.num_heads, self.head_dim)
+value = self._split_heads(value, self.num_heads, self.head_dim)""",
+            """query = self.hook_q(self._split_heads(query, self.num_heads, self.head_dim))
+key = self.hook_k(self._split_heads(key, self.num_heads, self.head_dim))
+value = self.hook_v(self._split_heads(value, self.num_heads, self.head_dim))
+""",
+        ),
+        # Hook after attention output
+        (
+            """attn_output = attn_output.transpose(1, 2).contiguous()""",
+            """attn_output = self.hook_z(attn_output)
+attn_output = attn_output.transpose(1, 2).contiguous()""",
         ),
     ],
     # Patching GPT2Attention to add hooks for attention components
@@ -112,39 +149,6 @@ attn_weights = self.hook_pattern(attn_weights)
             """attn_output = torch.matmul(attn_weights, value)
 attn_output = self.hook_z(attn_output)
 """,
-        ),
-    ],
-   # Patching GPT2SdpaAttention to add hooks (maybe this must be done before the attention AST patch???)
-    GPT2SdpaAttention=[
-        # Add hook points in __init__
-        (
-            """super().__init__(*args, **kwargs)""",
-            """super().__init__(*args, **kwargs)
-self.hook_q = HookPoint()
-self.hook_k = HookPoint()
-self.hook_v = HookPoint()
-self.hook_z = HookPoint()
-self.hook_attn_scores = HookPoint()
-self.hook_pattern = HookPoint()
-self.hook_result = HookPoint()
-print("GPT2SdpaAttention")
-""",
-        ),
-        # In forward, wrap q, k, v with hooks
-        (
-            """query = self._split_heads(query, self.num_heads, self.head_dim)
-key = self._split_heads(key, self.num_heads, self.head_dim)
-value = self._split_heads(value, self.num_heads, self.head_dim)""",
-            """query = self.hook_q(self._split_heads(query, self.num_heads, self.head_dim))
-key = self.hook_k(self._split_heads(key, self.num_heads, self.head_dim))
-value = self.hook_v(self._split_heads(value, self.num_heads, self.head_dim))
-""",
-        ),
-        # Hook after attention output
-        (
-            """attn_output = attn_output.transpose(1, 2).contiguous()""",
-            """attn_output = self.hook_z(attn_output)
-attn_output = attn_output.transpose(1, 2).contiguous()""",
         ),
     ],
     # Patching GPT2MLP to add hook_post
@@ -217,12 +221,15 @@ self.ln_1.hook_normalized = HookPoint()
 self.ln_2.hook_normalized = HookPoint()
 """,
         ),
+        # N.B. Mishax does not patch class level dicts, so we need to rip this one out otherwise attention is not instrumented.
         ("""attention_class = GPT2_ATTENTION_CLASSES[config._attn_implementation]""",
          """if config._attn_implementation == "eager":
     attention_class = GPT2Attention
 elif config._attn_implementation == "flash_attention_2":
+    warnings.warn("MishformerLens does not have tested support for FlashAttention2, use with caution! Pass `attn_implementation='eager'` to MishformerLens' HookedTransformer to avoid flash attention.")
     attention_class = GPT2FlashAttention2
 elif config._attn_implementation == "sdpa":
+    warnings.warn("MishformerLens may not expose patterns for SDPA attention, use with caution! Pass `attn_implementation='eager'` to MishformerLens' HookedTransformer to avoid flash attention.")
     attention_class = GPT2SdpaAttention
 else:
     raise ValueError(f"Unknown attention implementation: {{config._attn_implementation}}")"""),
@@ -371,7 +378,7 @@ class HookedTransformer(TransformerLensHookedTransformer):
         # TODO(v0): document/extend to all models, not just AutoModelForCausalLM
         ast_patched_hf_model = transformers.AutoModelForCausalLM.from_pretrained(
             official_model_name,
-            # TODO(v1): support Pythia checkpoint numbers
+            **from_pretrained_kwargs,  # TODO(v1): we pass this to config too, sort out
         )
 
         # TODO(v1): maybe stop or reduce this copy+paste from transformer_lens
@@ -533,7 +540,8 @@ model = HookedTransformer.from_pretrained(
     center_unembed=False,
     center_writing_weights=False,
     fold_value_biases=False,
-    device=DEVICE
+    device=DEVICE,
+    attn_implementation="eager",
 )
 
 #%%
