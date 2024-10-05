@@ -1,10 +1,19 @@
 # MishformerLens
 
+> MishformerLens intends to be a drop-in replacement for TransformerLens that AST patches HuggingFace Transformers rather than implementing a custom, numerically inaccurate Transformer architecture.
+
+MishformerLens is currently highly experimental.
+
 Status as of 5th October: https://www.diffchecker.com/TaW9IAhJ shows the difference between `https://colab.research.google.com/github/neelnanda-io/TransformerLens/blob/main/demos/Exploratory_Analysis_Demo.ipynb` and `MishformerLens/mishformer_lens/mishformer_lens_expoloratory_analysis_demo.py` -- very small.
 
 Note that we only have support for GPT-2 Small, and no fold LN etc. stuff, mostly just `from_pretrained_no_preprocessing` basically. It should be pretty easy to add fold LN etc. (with a small risk of numerical problems), and will be a lot harder to add support for every single model family.
 
 TODO(v0.1): write this up in full.
+
+# Roadmap
+
+v0.1: make this usable for most TransformerLens models, including everything upstreamed to TL.
+v1: PyPI, full testing, library ready for development.
 
 # Installation notes
 
