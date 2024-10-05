@@ -29,29 +29,29 @@ from jaxtyping import Float, Int
 from mishax import ast_patcher
 
 # Apply patches now:
-patcher = ModuleASTPatcher(
+patcher = ast_patcher.ModuleASTPatcher(
     transformers.models.gpt2.modeling_gpt2,
-    PatchSettings(
+    ast_patcher.PatchSettings(
         prefix="""from transformer_lens.hook_points import HookPoint
 """,
         allow_num_matches_upto=dict(
             # # o1 preview is wrong here:
             # GPT2MLP=1,
             # GPT2Model=1,
-            # GPT2Block=12,  # Number of transformer blocks in GPT-2 Small
-            # GPT2Attention=1,
+            GPT2Attention=2,
             # GPT2LayerNorm=1,
         ),
     ),
     # Patching GPT2Model to add hooks for embeddings and final layer norm
     GPT2Model=[
         # Add hook points in __init__
+        #
+        # TODO(v1): add support for LayerNorm scale; we can't currently as nn.LayerNorm does not expose this
         (
             """self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)""",
             """self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 self.hook_embed = HookPoint()
 self.hook_pos_embed = HookPoint()
-self.ln_f.hook_scale = HookPoint()
 self.ln_f.hook_normalized = HookPoint()
 """,
         ),
@@ -68,79 +68,6 @@ self.ln_f.hook_normalized = HookPoint()
         (
             """hidden_states = self.ln_f(hidden_states)""",
             """hidden_states = self.ln_f.hook_normalized(self.ln_f(hidden_states))""",
-        ),
-    ],
-    # Patching GPT2Block to add hooks for layer norms and residual connections
-    GPT2Block=[
-        # Add hook points in __init__
-        (
-            """self.mlp = GPT2MLP(inner_dim, config)""",
-            """self.mlp = GPT2MLP(inner_dim, config)
-self.hook_resid_pre = HookPoint()
-self.hook_resid_mid = HookPoint()
-self.hook_resid_post = HookPoint()
-self.hook_mlp_in = HookPoint()
-self.hook_mlp_out = HookPoint()
-self.hook_attn_in = HookPoint()
-self.hook_attn_out = HookPoint()
-self.ln_1.hook_scale = HookPoint()
-self.ln_1.hook_normalized = HookPoint()
-self.ln_2.hook_scale = HookPoint()
-self.ln_2.hook_normalized = HookPoint()
-""",
-        ),
-        # Wrap hidden_states with hooks in forward
-        (
-            """residual = hidden_states""",
-            """residual = hidden_states
-hidden_states = self.hook_resid_pre(hidden_states)
-""",
-        ),
-        (
-            """hidden_states = self.ln_1(hidden_states)""",
-            """hidden_states = self.ln_1.hook_normalized(self.ln_1(hidden_states))""",
-        ),
-        # Before self.attn
-        (
-            """attn_outputs = self.attn(""",
-            """hidden_states = self.hook_attn_in(hidden_states)
-attn_outputs = self.attn(""",
-        ),
-        # After self.attn
-        (
-            """attn_output = attn_outputs[0]""",
-            """attn_output = attn_outputs[0]
-attn_output = self.hook_attn_out(attn_output)
-""",
-        ),
-        (
-            """hidden_states = attn_output + residual""",
-            """hidden_states = attn_output + residual
-hidden_states = self.hook_resid_mid(hidden_states)
-""",
-        ),
-        # Wrap MLP inputs and outputs
-        (
-            """residual = hidden_states""",
-            """residual = hidden_states
-hidden_states = self.hook_mlp_in(hidden_states)
-""",
-        ),
-        (
-            """hidden_states = self.ln_2(hidden_states)""",
-            """hidden_states = self.ln_2.hook_normalized(self.ln_2(hidden_states))""",
-        ),
-        (
-            """feed_forward_hidden_states = self.mlp(hidden_states)""",
-            """feed_forward_hidden_states = self.mlp(hidden_states)
-feed_forward_hidden_states = self.hook_mlp_out(feed_forward_hidden_states)
-""",
-        ),
-        (
-            """hidden_states = residual + feed_forward_hidden_states""",
-            """hidden_states = residual + feed_forward_hidden_states
-hidden_states = self.hook_resid_post(hidden_states)
-""",
         ),
     ],
     # Patching GPT2Attention to add hooks for attention components
@@ -187,6 +114,39 @@ attn_output = self.hook_z(attn_output)
 """,
         ),
     ],
+   # Patching GPT2SdpaAttention to add hooks (maybe this must be done before the attention AST patch???)
+    GPT2SdpaAttention=[
+        # Add hook points in __init__
+        (
+            """super().__init__(*args, **kwargs)""",
+            """super().__init__(*args, **kwargs)
+self.hook_q = HookPoint()
+self.hook_k = HookPoint()
+self.hook_v = HookPoint()
+self.hook_z = HookPoint()
+self.hook_attn_scores = HookPoint()
+self.hook_pattern = HookPoint()
+self.hook_result = HookPoint()
+print("GPT2SdpaAttention")
+""",
+        ),
+        # In forward, wrap q, k, v with hooks
+        (
+            """query = self._split_heads(query, self.num_heads, self.head_dim)
+key = self._split_heads(key, self.num_heads, self.head_dim)
+value = self._split_heads(value, self.num_heads, self.head_dim)""",
+            """query = self.hook_q(self._split_heads(query, self.num_heads, self.head_dim))
+key = self.hook_k(self._split_heads(key, self.num_heads, self.head_dim))
+value = self.hook_v(self._split_heads(value, self.num_heads, self.head_dim))
+""",
+        ),
+        # Hook after attention output
+        (
+            """attn_output = attn_output.transpose(1, 2).contiguous()""",
+            """attn_output = self.hook_z(attn_output)
+attn_output = attn_output.transpose(1, 2).contiguous()""",
+        ),
+    ],
     # Patching GPT2MLP to add hook_post
     GPT2MLP=[
         # Add hook_post in __init__
@@ -204,9 +164,121 @@ hidden_states = self.hook_post(hidden_states)
 """,
         ),
     ],
+    # Patching GPT2FlashAttention2 to add hooks
+    # Patching GPT2FlashAttention2 to add hooks
+    GPT2FlashAttention2=[
+        # Add hook points in __init__
+        (
+            """super().__init__(*args, **kwargs)""",
+            """super().__init__(*args, **kwargs)
+self.hook_q = HookPoint()
+self.hook_k = HookPoint()
+self.hook_v = HookPoint()
+self.hook_z = HookPoint()
+self.hook_attn_scores = HookPoint()
+self.hook_pattern = HookPoint()
+self.hook_result = HookPoint()
+""",
+        ),
+        # In forward, wrap q, k, v with hooks
+        (
+            """query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)""",
+            """query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
+query = self.hook_q(query)
+key = self.hook_k(key)
+value = self.hook_v(value)
+""",
+
+        ),
+        # Hook after attention output
+        (
+            """attn_weights_reshaped = attn_output.reshape(bsz, query_length, self.num_heads * self.head_dim)""",
+            """attn_output = self.hook_z(attn_output)
+attn_weights_reshaped = attn_output.reshape(bsz, query_length, self.num_heads * self.head_dim)
+attn_output = self.hook_z(attn_output)
+""",
+        ),
+    ],
+    # Patching GPT2Block to add hooks for layer norms and residual connections
+    GPT2Block=[
+        # Add hook points in __init__
+        # TODO(v1): add support for LayerNorm scale; we can't currently as nn.LayerNorm does not expose this
+        (
+            """self.mlp = GPT2MLP(inner_dim, config)""",
+            """self.mlp = GPT2MLP(inner_dim, config)
+self.hook_resid_pre = HookPoint()
+self.hook_resid_mid = HookPoint()
+self.hook_resid_post = HookPoint()
+self.hook_mlp_in = HookPoint()
+self.hook_mlp_out = HookPoint()
+self.hook_attn_in = HookPoint()
+self.hook_attn_out = HookPoint()
+self.ln_1.hook_normalized = HookPoint()
+self.ln_2.hook_normalized = HookPoint()
+""",
+        ),
+        ("""attention_class = GPT2_ATTENTION_CLASSES[config._attn_implementation]""",
+         """if config._attn_implementation == "eager":
+    attention_class = GPT2Attention
+elif config._attn_implementation == "flash_attention_2":
+    attention_class = GPT2FlashAttention2
+elif config._attn_implementation == "sdpa":
+    attention_class = GPT2SdpaAttention
+else:
+    raise ValueError(f"Unknown attention implementation: {{config._attn_implementation}}")"""),
+        # Wrap hidden_states with hooks in forward
+        (
+            """residual = hidden_states
+hidden_states = self.ln_1(hidden_states)""",
+            """residual = self.hook_resid_pre(hidden_states)
+hidden_states = self.ln_1(hidden_states)""",
+        ),
+        (
+            """hidden_states = self.ln_1(hidden_states)""",
+            """hidden_states = self.ln_1.hook_normalized(self.ln_1(hidden_states))
+hidden_states = self.hook_attn_in(hidden_states)""",
+        ),
+        # After self.attn
+        (
+            """attn_output = attn_outputs[0]""",
+            """attn_output = attn_outputs[0]
+attn_output = self.hook_attn_out(attn_output)
+""",
+        ),
+        (
+            """hidden_states = attn_output + residual""",
+            """hidden_states = attn_output + residual
+hidden_states = self.hook_resid_mid(hidden_states)
+""",
+        ),
+        # Wrap MLP inputs and outputs
+        (
+            """residual = hidden_states
+hidden_states = self.ln_2(hidden_states)""",
+            """residual = self.hook_mlp_in(hidden_states)
+hidden_states = self.ln_2(hidden_states)""",
+        ),
+        (
+            """hidden_states = self.ln_2(hidden_states)""",
+            """hidden_states = self.ln_2.hook_normalized(self.ln_2(hidden_states))""",
+        ),
+        (
+            """feed_forward_hidden_states = self.mlp(hidden_states)""",
+            """feed_forward_hidden_states = self.mlp(hidden_states)
+feed_forward_hidden_states = self.hook_mlp_out(feed_forward_hidden_states)
+""",
+        ),
+        (
+            """hidden_states = residual + feed_forward_hidden_states""",
+            """hidden_states = residual + feed_forward_hidden_states
+hidden_states = self.hook_resid_post(hidden_states)
+""",
+        ),
+    ],
 )()
 
 patcher.__enter__()
+# N.B. patcher.__exit__(None,None,None) exits.
 
 #%%
 
@@ -471,21 +543,11 @@ output = model("Hey")
 
 #%%
 
-def yapper_and_editor(z, hook):
-    print('yap')
-    z*=2
-    return z
-
-logits1 = model("Hey")
-
-logits2 = model.run_with_hooks(
-    "Hey",
-    fwd_hooks=[
-        ('_ast_patched_hf_model.transformer.h.0.mlp.hook_pre', yapper_and_editor)
-    ]
-)
-
-logits1, logits2 # these sure look different...
+logits, cache = model.run_with_cache("Hey")
+assert any(["hook_q" in k for k in cache.keys()])
 
 #%%
 
+# %%
+
+#%%
