@@ -2,7 +2,7 @@
 
 > MishformerLens intends to be a drop-in replacement for TransformerLens that AST patches HuggingFace Transformers rather than implementing a custom, numerically inaccurate Transformer architecture.
 
-MishformerLens is currently highly experimental.
+MishformerLens is currently highly experimental and at version 0.0.x.
 
 Status as of 5th October: https://www.diffchecker.com/TaW9IAhJ shows the difference between `https://colab.research.google.com/github/neelnanda-io/TransformerLens/blob/main/demos/Exploratory_Analysis_Demo.ipynb` and `MishformerLens/mishformer_lens/mishformer_lens_expoloratory_analysis_demo.py` -- very small.
 

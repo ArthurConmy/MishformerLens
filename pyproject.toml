@@ -1,6 +1,6 @@
 [project]
 name = "mishformer_lens"
-version = "0.0"  # TODO(v0.1)  # TODO(v1)
+version = "0.0.1"  # TODO(v0.1)  # TODO(v1)
 description = "MishformerLens pre-release dev"
 requires-python = ">=3.10"  # TODO(v1): submit changes to Mishax so we can support 3.7 like TransformerLens
 
