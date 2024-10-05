@@ -7,3 +7,12 @@ requires-python = ">=3.10"  # TODO(v1): submit changes to Mishax so we can suppo
 [build-system]
 requires = ["setuptools>=61.0"]  # TODO(v0.1): mishax, transformer_lens and transformers should be pinned here
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["mishformer_lens"]
+
+[tool.setuptools.package-data]
+mishformer_lens = ["py.typed"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["assets"]
