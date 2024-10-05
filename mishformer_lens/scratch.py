@@ -29,27 +29,181 @@ from jaxtyping import Float, Int
 from mishax import ast_patcher
 
 # Apply patches now:
-patcher = ast_patcher.ModuleASTPatcher(
+patcher = ModuleASTPatcher(
     transformers.models.gpt2.modeling_gpt2,
-    ast_patcher.PatchSettings(
+    PatchSettings(
         prefix="""from transformer_lens.hook_points import HookPoint
-""", allow_num_matches_upto=dict(
-            # GPT2Attention=2
-        )
+""",
+        allow_num_matches_upto=dict(
+            # # o1 preview is wrong here:
+            # GPT2MLP=1,
+            # GPT2Model=1,
+            # GPT2Block=12,  # Number of transformer blocks in GPT-2 Small
+            # GPT2Attention=1,
+            # GPT2LayerNorm=1,
+        ),
     ),
-# # N.B. I think this attention class is not always used...?
-#     GPT2Attention=[
-#         ("self.config = config", """self.config=config
-# self.hook_pattern = HookPoint()
-# print('Registered a hook point!')"""),
-#         ("attn_output = torch.matmul(attn_weights, value)", """attn_output = torch.matmul(self.hook_pattern(attn_weights), value)""")
-#     ],
+    # Patching GPT2Model to add hooks for embeddings and final layer norm
+    GPT2Model=[
+        # Add hook points in __init__
+        (
+            """self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)""",
+            """self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+self.hook_embed = HookPoint()
+self.hook_pos_embed = HookPoint()
+self.ln_f.hook_scale = HookPoint()
+self.ln_f.hook_normalized = HookPoint()
+""",
+        ),
+        # Wrap embeddings with hooks in forward
+        (
+            """inputs_embeds = self.wte(input_ids)""",
+            """inputs_embeds = self.hook_embed(self.wte(input_ids))""",
+        ),
+        (
+            """position_embeds = self.wpe(position_ids)""",
+            """position_embeds = self.hook_pos_embed(self.wpe(position_ids))""",
+        ),
+        # Add hooks after final layer norm in forward
+        (
+            """hidden_states = self.ln_f(hidden_states)""",
+            """hidden_states = self.ln_f.hook_normalized(self.ln_f(hidden_states))""",
+        ),
+    ],
+    # Patching GPT2Block to add hooks for layer norms and residual connections
+    GPT2Block=[
+        # Add hook points in __init__
+        (
+            """self.mlp = GPT2MLP(inner_dim, config)""",
+            """self.mlp = GPT2MLP(inner_dim, config)
+self.hook_resid_pre = HookPoint()
+self.hook_resid_mid = HookPoint()
+self.hook_resid_post = HookPoint()
+self.hook_mlp_in = HookPoint()
+self.hook_mlp_out = HookPoint()
+self.hook_attn_in = HookPoint()
+self.hook_attn_out = HookPoint()
+self.ln_1.hook_scale = HookPoint()
+self.ln_1.hook_normalized = HookPoint()
+self.ln_2.hook_scale = HookPoint()
+self.ln_2.hook_normalized = HookPoint()
+""",
+        ),
+        # Wrap hidden_states with hooks in forward
+        (
+            """residual = hidden_states""",
+            """residual = hidden_states
+hidden_states = self.hook_resid_pre(hidden_states)
+""",
+        ),
+        (
+            """hidden_states = self.ln_1(hidden_states)""",
+            """hidden_states = self.ln_1.hook_normalized(self.ln_1(hidden_states))""",
+        ),
+        # Before self.attn
+        (
+            """attn_outputs = self.attn(""",
+            """hidden_states = self.hook_attn_in(hidden_states)
+attn_outputs = self.attn(""",
+        ),
+        # After self.attn
+        (
+            """attn_output = attn_outputs[0]""",
+            """attn_output = attn_outputs[0]
+attn_output = self.hook_attn_out(attn_output)
+""",
+        ),
+        (
+            """hidden_states = attn_output + residual""",
+            """hidden_states = attn_output + residual
+hidden_states = self.hook_resid_mid(hidden_states)
+""",
+        ),
+        # Wrap MLP inputs and outputs
+        (
+            """residual = hidden_states""",
+            """residual = hidden_states
+hidden_states = self.hook_mlp_in(hidden_states)
+""",
+        ),
+        (
+            """hidden_states = self.ln_2(hidden_states)""",
+            """hidden_states = self.ln_2.hook_normalized(self.ln_2(hidden_states))""",
+        ),
+        (
+            """feed_forward_hidden_states = self.mlp(hidden_states)""",
+            """feed_forward_hidden_states = self.mlp(hidden_states)
+feed_forward_hidden_states = self.hook_mlp_out(feed_forward_hidden_states)
+""",
+        ),
+        (
+            """hidden_states = residual + feed_forward_hidden_states""",
+            """hidden_states = residual + feed_forward_hidden_states
+hidden_states = self.hook_resid_post(hidden_states)
+""",
+        ),
+    ],
+    # Patching GPT2Attention to add hooks for attention components
+    GPT2Attention=[
+        # Add hook points in __init__
+        (
+            """self.c_proj = Conv1D(self.embed_dim, self.embed_dim)""",
+            """self.c_proj = Conv1D(self.embed_dim, self.embed_dim)
+self.hook_q = HookPoint()
+self.hook_k = HookPoint()
+self.hook_v = HookPoint()
+self.hook_z = HookPoint()
+self.hook_attn_scores = HookPoint()
+self.hook_pattern = HookPoint()
+self.hook_result = HookPoint()
+""",
+        ),
+        # In forward, wrap q, k, v with hooks
+        (
+            """query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)""",
+            """query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
+query = self.hook_q(query)
+key = self.hook_k(key)
+value = self.hook_v(value)
+""",
+        ),
+        # Wrap attention weights and outputs
+        (
+            """attn_weights = torch.matmul(query, key.transpose(-1, -2))""",
+            """attn_weights = torch.matmul(query, key.transpose(-1, -2))
+attn_weights = self.hook_attn_scores(attn_weights)
+""",
+        ),
+        (
+            """attn_weights = nn.functional.softmax(attn_weights, dim=-1)""",
+            """attn_weights = nn.functional.softmax(attn_weights, dim=-1)
+attn_weights = self.hook_pattern(attn_weights)
+""",
+        ),
+        (
+            """attn_output = torch.matmul(attn_weights, value)""",
+            """attn_output = torch.matmul(attn_weights, value)
+attn_output = self.hook_z(attn_output)
+""",
+        ),
+    ],
+    # Patching GPT2MLP to add hook_post
     GPT2MLP=[
-        ("""embed_dim = config.hidden_size""", """embed_dim = config.hidden_size
-print('Inside the MLP!')
-self.hook_pre = HookPoint()"""),
-        ("""hidden_states = self.c_fc(hidden_states)""", """hidden_states = self.hook_pre(self.c_fc(hidden_states))""")
-    ]
+        # Add hook_post in __init__
+        (
+            """self.dropout = nn.Dropout(config.resid_pdrop)""",
+            """self.dropout = nn.Dropout(config.resid_pdrop)
+self.hook_post = HookPoint()
+""",
+        ),
+        # Wrap MLP output with hook_post in forward
+        (
+            """hidden_states = self.dropout(hidden_states)""",
+            """hidden_states = self.dropout(hidden_states)
+hidden_states = self.hook_post(hidden_states)
+""",
+        ),
+    ],
 )()
 
 patcher.__enter__()
