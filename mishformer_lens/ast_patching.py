@@ -50,8 +50,8 @@ self.ln_f.hook_scale = HookPoint()
             """position_embeds = self.wpe(position_ids)""",
             """position_embeds = self.hook_pos_embed(einops.repeat(self.wpe(position_ids), "1 pos d_model -> batch pos d_model", batch=inputs_embeds.shape[0]))""",
         ),
-        # model._ast_patched_hf_model.transformer.h[0].attn.c_proj.weight.shape -> 768 768
         # Add hooks after final layer norm in forward
+        # TODO(v0.1): also add scale hooks for the LNs inside the model
         (
             """hidden_states = self.ln_f(hidden_states)""",
             """manually_computed_layer_norm_scale = layer_norm_scale(hidden_states, self.ln_f.eps)
@@ -117,18 +117,10 @@ key = self.hook_k(self._split_heads(key, self.num_heads, self.head_dim))
 value = self.hook_v(self._split_heads(value, self.num_heads, self.head_dim))
 """,
         ),
-        # Wrap attention weights and outputs
-        (
-            """attn_weights = torch.matmul(query, key.transpose(-1, -2))""",
-            """attn_weights = torch.matmul(query, key.transpose(-1, -2))
-attn_weights = self.hook_attn_scores(attn_weights)
-""",
-        ),
+        # Wrap attention scores and patterns
         (
             """attn_weights = nn.functional.softmax(attn_weights, dim=-1)""",
-            """attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-attn_weights = self.hook_pattern(attn_weights)
-""",
+            """attn_weights = self.hook_pattern(nn.functional.softmax(self.hook_attn_scores(attn_weights), dim=-1))""",
         ),
         (
             """attn_output = torch.matmul(attn_weights, value)""",
@@ -316,6 +308,8 @@ self.hook_z = HookPoint(input_callable=einops_rearrange_factory("batch head pos 
 self.hook_attn_scores = HookPoint()
 self.hook_pattern = HookPoint()
 self.hook_result = HookPoint()
+self.hook_rot_q = HookPoint()
+self.hook_rot_k = HookPoint()
 """,
         ),
         # In forward, wrap q, k, v with hooks
@@ -330,6 +324,21 @@ query = self.hook_q(query)
 key = self.hook_k(key)
 value = self.hook_v(value)
 """,
+        ),
+        # Hook rotary embeddings
+        (
+            """query = torch.cat((query, query_pass), dim=-1)""",
+            """query = self.hook_rot_q(torch.cat((query, query_pass), dim=-1))""",
+        ),
+        (
+            """key = torch.cat((key, key_pass), dim=-1)""",
+            """key = self.hook_rot_k(torch.cat((key, key_pass), dim=-1))""",
+        ),
+        # Hook attention score and pattern hooking
+        (
+            """attn_weights = nn.functional.softmax(attn_scores, dim=-1)""",
+            """attn_scores = self.hook_attn_scores(attn_scores)
+attn_weights = self.hook_pattern(nn.functional.softmax(attn_scores, dim=-1))""",
         ),
         # Hook after attention output
         (

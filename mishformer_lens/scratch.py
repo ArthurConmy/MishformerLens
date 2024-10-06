@@ -37,7 +37,7 @@ DTYPE = torch.float32
 
 # Use the context manager to disable patching temporarily
 with mishformer_lens.ast_patching_disabled():
-    tl_model = TLHookedTransformer.from_pretrained("EleutherAI/pythia-70m", device=DEVICE)
+    tl_model = TLHookedTransformer.from_pretrained_no_processing("EleutherAI/pythia-70m", device=DEVICE)
     tl_model.set_use_hook_mlp_in(True)
     tokens = tl_model.to_tokens(MY_STRING, prepend_bos=True).to(DEVICE)
     tl_raw_logits = tl_model(tokens)[0]
@@ -84,7 +84,7 @@ def check_performance(tl_model, hf_model, margin):
 model = HookedTransformer.from_pretrained_no_processing(
     "EleutherAI/pythia-70m",
     torch_dtype=DTYPE,
-    # attn_implementation='eager',
+    attn_implementation='eager',
 )
 
 #%%
@@ -93,6 +93,26 @@ logits, cache = model.run_with_cache(tokens)
 
 #%%
 
-torch.testing.assert_close(logits, hf_raw_logits)
+# Only our implementation with eager attention is correct to default 1e-5 and 1e-6 ish torch assert_close defaults.
+#
+# Both TL and eager MFLens are correct to 1e-4 to the ground truth HF logits.
+torch.testing.assert_close(logits, hf_raw_logits, atol=1e-4, rtol=1e-4)
+
+#%%
+
+# Check if the keys in cache are the same as in tl_cache
+cache_keys = set(cache.keys())
+tl_cache_keys = set(tl_cache.keys())
+if cache_keys != tl_cache_keys:
+    print("The cache keys are different.")
+    print("Keys in cache but not in tl_cache:")
+    print(cache_keys - tl_cache_keys)
+    print("Keys in tl_cache but not in cache:")
+    print(tl_cache_keys - cache_keys)
+else:
+    print("The cache keys are the same in both caches.")
+# Print the number of keys in each cache
+print(f"Number of keys in cache: {len(cache_keys)}")
+print(f"Number of keys in tl_cache: {len(tl_cache_keys)}")
 
 #%%
