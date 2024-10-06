@@ -33,6 +33,7 @@ DEVICE = "cuda"
 #%%
 
 tl_model = TLHookedTransformer.from_pretrained("EleutherAI/pythia-70m", device=DEVICE)
+tl_model.set_use_hook_mlp_in(True)
 print(tl_model.hook_dict.keys())
 
 #%%
@@ -89,6 +90,38 @@ for module_name in pythia_named_modules:
 
 dtype = torch.float32
 model = HookedTransformer.from_pretrained_no_processing("EleutherAI/pythia-70m", torch_dtype=dtype)
+
+#%%
+
+logits, cache = model.run_with_cache("Hello, world!")
+
+#%%
+
+tl_logits, tl_cache = tl_model.run_with_cache("Hello, world!")
+
+#%%
+
+torch.testing.assert_close(logits, tl_logits) # lol
+
+#%%
+
+# Check if the keys in cache are the same as in tl_cache
+cache_keys = set(cache.keys())
+tl_cache_keys = set(tl_cache.keys())
+
+if cache_keys != tl_cache_keys:
+    print("The cache keys are different.")
+    print("Keys in cache but not in tl_cache:")
+    print(cache_keys - tl_cache_keys)
+    print("Keys in tl_cache but not in cache:")
+    print(tl_cache_keys - cache_keys)
+else:
+    print("The cache keys are the same in both caches.")
+
+# Print the number of keys in each cache
+print(f"Number of keys in cache: {len(cache_keys)}")
+print(f"Number of keys in tl_cache: {len(tl_cache_keys)}")
+
 
 #%%
 # For low precision, the processing is not advised.

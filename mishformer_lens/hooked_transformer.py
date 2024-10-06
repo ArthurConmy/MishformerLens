@@ -124,8 +124,10 @@ class HookedTransformer(TransformerLensHookedTransformer):
             default_padding_side=default_padding_side
         )
         self._ast_patched_hf_model = ast_patched_hf_model
+
+        logging.warning("TODO(v1): MishformerLens sets set_use_hook_mlp_in==True always: it is set on for this model.")
+
         # N.B. there's an internal TransformerLens .setup() already called, that does nothing
-        print([name for name, _ in self._ast_patched_hf_model.named_modules()])
         if self.cfg.model_name.startswith('pythia'):
             naming_transformation = map_pythia_module_names
         elif self.cfg.model_name.startswith('gpt2'):

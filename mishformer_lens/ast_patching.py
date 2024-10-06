@@ -354,7 +354,7 @@ self.hook_post = HookPoint()
             """self.mlp = GPTNeoXMLP(config)""",
             """self.mlp = GPTNeoXMLP(config)
 self.hook_resid_pre = HookPoint()
-self.hook_resid_mid = HookPoint()
+# self.hook_resid_mid = HookPoint()
 self.hook_resid_post = HookPoint()
 self.hook_mlp_in = HookPoint()
 self.hook_mlp_out = HookPoint()
@@ -395,12 +395,12 @@ attention_layer_outputs = self.attention(
             """attn_output = attention_layer_outputs[0]
 attn_output = self.hook_attn_out(attn_output)""",
         ),
-        (
-            """attn_output = self.post_attention_dropout(attn_output)""",
-            """attn_output = self.post_attention_dropout(attn_output)
-hidden_states = attn_output + residual
-hidden_states = self.hook_resid_mid(hidden_states)""",
-        ),
+#         (
+#             """attn_output = self.post_attention_dropout(attn_output)""",
+#             """attn_output = self.post_attention_dropout(attn_output)
+# hidden_states = attn_output + residual
+# hidden_states = self.hook_resid_mid(hidden_states)""",
+#         ),
         # Wrap MLP inputs and outputs
         (
             """mlp_output = self.mlp(self.post_attention_layernorm(hidden_states))""",
