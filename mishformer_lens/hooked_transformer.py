@@ -89,6 +89,10 @@ def map_pythia_module_names(name: str) -> str:
                 return f'blocks.{layer_num}.mlp.hook_post'
             elif rest.startswith('hook_'):
                 return f'blocks.{layer_num}.{rest}'
+            elif rest == 'input_layernorm.hook_scale':
+                return f'blocks.{layer_num}.ln1.hook_scale'
+            elif rest == 'post_attention_layernorm.hook_scale':
+                return f'blocks.{layer_num}.ln2.hook_scale'
         else:
             raise ValueError(f"Cannot map name '{name}' (no 'hook' substring)")
 

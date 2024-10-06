@@ -51,13 +51,13 @@ self.ln_f.hook_scale = HookPoint()
             """position_embeds = self.hook_pos_embed(einops.repeat(self.wpe(position_ids), "1 pos d_model -> batch pos d_model", batch=inputs_embeds.shape[0]))""",
         ),
         # Add hooks after final layer norm in forward
-        # TODO(v0.1): also add scale hooks for the LNs inside the model
+        # This tomfoolery is necessary to allow for the scale of the layer norm to actually
+        # be writable by the user.
         (
             """hidden_states = self.ln_f(hidden_states)""",
             """manually_computed_layer_norm_scale = layer_norm_scale(hidden_states, self.ln_f.eps)
-should_be_no_op_layer_norm_scale = self.ln_f.hook_scale(manually_computed_layer_norm_scale)
-torch.testing.assert_close(should_be_no_op_layer_norm_scale, manually_computed_layer_norm_scale, atol=1e-3, rtol=1e-3)  # N.B. writing to this hook point is a no-op, so we assert that their's <1e-3 error  # TODO(v1): maybe add a disable for this? Or ideally better solution in general; we could allow the below to be multiplied by (true_scale / our_scale)
-hidden_states = self.ln_f.hook_normalized(self.ln_f(hidden_states))""",
+hook_wrapped_layer_norm_scale = self.ln_f.hook_scale(manually_computed_layer_norm_scale)
+hidden_states = self.ln_f.hook_normalized(self.ln_f(hidden_states) * (hook_wrapped_layer_norm_scale / manually_computed_layer_norm_scale))""",
         ),
     ],
     GPT2SdpaAttention=[
@@ -197,6 +197,8 @@ self.hook_mlp_out = HookPoint()
 self.hook_attn_out = HookPoint()
 self.ln_1.hook_normalized = HookPoint()
 self.ln_2.hook_normalized = HookPoint()
+self.ln_1.hook_scale = HookPoint()
+self.ln_2.hook_scale = HookPoint()
 """,
         ),
         # N.B. Mishax does not patch class level dicts, so we need to rip this one out otherwise attention is not instrumented.
@@ -220,7 +222,9 @@ hidden_states = self.ln_1(hidden_states)""",
         ),
         (
             """hidden_states = self.ln_1(hidden_states)""",
-            """hidden_states = self.ln_1.hook_normalized(self.ln_1(hidden_states))""",
+            """manually_computed_layer_norm_scale = layer_norm_scale(hidden_states, self.ln_1.eps)
+hook_wrapped_layer_norm_scale = self.ln_1.hook_scale(manually_computed_layer_norm_scale)
+hidden_states = self.ln_1.hook_normalized(self.ln_1(hidden_states) * (hook_wrapped_layer_norm_scale / manually_computed_layer_norm_scale))""",
         ),
         # After self.attn
         (
@@ -244,7 +248,9 @@ hidden_states = self.ln_2(hidden_states)""",
         ),
         (
             """hidden_states = self.ln_2(hidden_states)""",
-            """hidden_states = self.ln_2.hook_normalized(self.ln_2(hidden_states))""",
+            """manually_computed_layer_norm_scale = layer_norm_scale(hidden_states, self.ln_2.eps)
+hook_wrapped_layer_norm_scale = self.ln_2.hook_scale(manually_computed_layer_norm_scale)
+hidden_states = self.ln_2.hook_normalized(self.ln_2(hidden_states) * (hook_wrapped_layer_norm_scale / manually_computed_layer_norm_scale))""",
         ),
         (
             """feed_forward_hidden_states = self.mlp(hidden_states)""",
@@ -291,9 +297,8 @@ self.final_layer_norm.hook_scale = HookPoint()
         (
             """hidden_states = self.final_layer_norm(hidden_states)""",
             """manually_computed_layer_norm_scale = layer_norm_scale(hidden_states, self.final_layer_norm.eps)
-should_be_no_op_layer_norm_scale = self.final_layer_norm.hook_scale(manually_computed_layer_norm_scale)
-torch.testing.assert_close(should_be_no_op_layer_norm_scale, manually_computed_layer_norm_scale, atol=1e-3, rtol=1e-3)
-hidden_states = self.final_layer_norm.hook_normalized(self.final_layer_norm(hidden_states))""",
+hook_wrapped_layer_norm_scale = self.final_layer_norm.hook_scale(manually_computed_layer_norm_scale)
+hidden_states = self.final_layer_norm.hook_normalized(self.final_layer_norm(hidden_states) * (hook_wrapped_layer_norm_scale / manually_computed_layer_norm_scale))""",
         ),
     ],
     GPTNeoXAttention=[
@@ -308,8 +313,8 @@ self.hook_z = HookPoint(input_callable=einops_rearrange_factory("batch head pos 
 self.hook_attn_scores = HookPoint()
 self.hook_pattern = HookPoint()
 self.hook_result = HookPoint()
-self.hook_rot_q = HookPoint()
-self.hook_rot_k = HookPoint()
+self.hook_rot_q = HookPoint(input_callable=einops_rearrange_factory("batch head_index pos d_head -> batch pos head_index d_head"), output_callable=einops_rearrange_factory("batch pos head_index d_head -> batch head_index pos d_head"))
+self.hook_rot_k = HookPoint(input_callable=einops_rearrange_factory("batch head_index pos d_head -> batch pos head_index d_head"), output_callable=einops_rearrange_factory("batch pos head_index d_head -> batch head_index pos d_head"))
 """,
         ),
         # In forward, wrap q, k, v with hooks
@@ -389,6 +394,8 @@ self.hook_mlp_out = HookPoint()
 self.hook_attn_out = HookPoint()
 self.input_layernorm.hook_normalized = HookPoint()
 self.post_attention_layernorm.hook_normalized = HookPoint()
+self.input_layernorm.hook_scale = HookPoint()
+self.post_attention_layernorm.hook_scale = HookPoint()
 """,
         ),
         # Wrap hidden_states with hooks in forward
@@ -405,8 +412,12 @@ self.post_attention_layernorm.hook_normalized = HookPoint()
                 position_embeddings=position_embeddings,
             )""",
             """hidden_states = self.hook_resid_pre(hidden_states)
+manually_computed_layer_norm_scale = layer_norm_scale(hidden_states, self.input_layernorm.eps)
+hook_wrapped_layer_norm_scale = self.input_layernorm.hook_scale(manually_computed_layer_norm_scale)
+hidden_states_normed = self.input_layernorm(hidden_states) * (hook_wrapped_layer_norm_scale / manually_computed_layer_norm_scale)
+hidden_states_normed = self.input_layernorm.hook_normalized(hidden_states_normed)
 attention_layer_outputs = self.attention(
-    self.input_layernorm.hook_normalized(self.input_layernorm(hidden_states)),
+    hidden_states_normed,
     attention_mask=attention_mask,
     position_ids=position_ids,
     layer_past=layer_past,
@@ -426,7 +437,12 @@ attn_output = self.hook_attn_out(attn_output)""",
         # Wrap MLP inputs and outputs
         (
             """mlp_output = self.mlp(self.post_attention_layernorm(hidden_states))""",
-            """mlp_output = self.mlp(self.post_attention_layernorm.hook_normalized(self.post_attention_layernorm(self.hook_mlp_in(hidden_states))))
+            """mlp_in = self.hook_mlp_in(hidden_states)
+manually_computed_layer_norm_scale = layer_norm_scale(mlp_in, self.post_attention_layernorm.eps)
+hook_wrapped_layer_norm_scale = self.post_attention_layernorm.hook_scale(manually_computed_layer_norm_scale)
+hidden_states_normed = self.post_attention_layernorm(mlp_in) * (hook_wrapped_layer_norm_scale / manually_computed_layer_norm_scale)
+hidden_states_normed = self.post_attention_layernorm.hook_normalized(hidden_states_normed)
+mlp_output = self.mlp(hidden_states_normed)
 mlp_output = self.hook_mlp_out(mlp_output)""",
         ),
         (

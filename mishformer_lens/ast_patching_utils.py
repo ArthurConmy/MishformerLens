@@ -9,7 +9,7 @@ from transformer_lens import hook_points
 def layer_norm_scale(x: jt.Float[torch.Tensor, "batch pos length"], eps: float) -> jt.Float[torch.Tensor, "batch pos 1"]:
     centered_x = x - x.mean(-1, keepdim=True)  # [batch, pos, length]
     return (
-        (x.pow(2).mean(-1, keepdim=True) + eps).sqrt()
+        (centered_x.pow(2).mean(-1, keepdim=True) + eps).sqrt()
     )
 
 def einops_rearrange_factory(
