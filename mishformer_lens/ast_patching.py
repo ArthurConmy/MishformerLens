@@ -56,7 +56,7 @@ self.ln_f.hook_scale = HookPoint()
             """hidden_states = self.ln_f(hidden_states)""",
             """manually_computed_layer_norm_scale = layer_norm_scale(hidden_states, self.ln_f.eps)
 should_be_no_op_layer_norm_scale = self.ln_f.hook_scale(manually_computed_layer_norm_scale)
-torch.testing.assert_allclose(should_be_no_op_layer_norm_scale, manually_computed_layer_norm_scale, atol=1e-3, rtol=1e-3)  # N.B. writing to this hook point is a no-op, so we assert that their's <1e-3 error  # TODO(v1): maybe add a disable for this? Or ideally better solution in general; we could allow the below to be multiplied by (true_scale / our_scale)
+torch.testing.assert_close(should_be_no_op_layer_norm_scale, manually_computed_layer_norm_scale, atol=1e-3, rtol=1e-3)  # N.B. writing to this hook point is a no-op, so we assert that their's <1e-3 error  # TODO(v1): maybe add a disable for this? Or ideally better solution in general; we could allow the below to be multiplied by (true_scale / our_scale)
 hidden_states = self.ln_f.hook_normalized(self.ln_f(hidden_states))""",
         ),
     ],
@@ -276,6 +276,7 @@ register_patcher(ast_patcher.ModuleASTPatcher(
         prefix="""from transformer_lens.hook_points import HookPoint
 from mishformer_lens.ast_patching_utils import layer_norm_scale, einops_rearrange_factory
 import einops
+import warnings
 """,
         allow_num_matches_upto=dict(),
     ),
@@ -299,7 +300,7 @@ self.final_layer_norm.hook_scale = HookPoint()
             """hidden_states = self.final_layer_norm(hidden_states)""",
             """manually_computed_layer_norm_scale = layer_norm_scale(hidden_states, self.final_layer_norm.eps)
 should_be_no_op_layer_norm_scale = self.final_layer_norm.hook_scale(manually_computed_layer_norm_scale)
-torch.testing.assert_allclose(should_be_no_op_layer_norm_scale, manually_computed_layer_norm_scale, atol=1e-3, rtol=1e-3)
+torch.testing.assert_close(should_be_no_op_layer_norm_scale, manually_computed_layer_norm_scale, atol=1e-3, rtol=1e-3)
 hidden_states = self.final_layer_norm.hook_normalized(self.final_layer_norm(hidden_states))""",
         ),
     ],
@@ -322,7 +323,10 @@ self.hook_result = HookPoint()
             """query = qkv[..., : self.head_size].permute(0, 2, 1, 3)
 key = qkv[..., self.head_size : 2 * self.head_size].permute(0, 2, 1, 3)
 value = qkv[..., 2 * self.head_size :].permute(0, 2, 1, 3)""",
-            """query = self.hook_q(query)
+            """query = qkv[..., : self.head_size].permute(0, 2, 1, 3)
+key = qkv[..., self.head_size : 2 * self.head_size].permute(0, 2, 1, 3)
+value = qkv[..., 2 * self.head_size :].permute(0, 2, 1, 3)
+query = self.hook_q(query)
 key = self.hook_k(key)
 value = self.hook_v(value)
 """,
@@ -330,7 +334,7 @@ value = self.hook_v(value)
         # Hook after attention output
         (
             """attn_output = self._merge_heads(attn_output, self.num_attention_heads, self.head_size)""",
-            """attn_output = self.hook_z(self._merge_heads(attn_output, self.num_attention_heads, self.head_size))""",
+            """attn_output = self._merge_heads(self.hook_z(attn_output), self.num_attention_heads, self.head_size)""",
         ),
     ],
     GPTNeoXMLP=[
@@ -349,6 +353,21 @@ self.hook_post = HookPoint()
         ),
     ],
     GPTNeoXLayer=[
+        # Add the new patch for attention class selection
+        (
+            """self.attention = GPT_NEOX_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)""",
+            """if config._attn_implementation == "eager":
+    attention_class = GPTNeoXAttention
+elif config._attn_implementation == "flash_attention_2":
+    warnings.warn("MishformerLens does not have tested support for FlashAttention2, use with caution! Pass `attn_implementation='eager'` to MishformerLens' HookedTransformer.from_pretrained to avoid flash attention.")
+    attention_class = GPTNeoXFlashAttention2
+elif config._attn_implementation == "sdpa":
+    warnings.warn("MishformerLens may not expose patterns for SDPA attention, use with caution! Pass `attn_implementation='eager'` to MishformerLens' HookedTransformer.from_pretrained to avoid SDPA attention.")
+    attention_class = GPTNeoXSdpaAttention
+else:
+    raise ValueError(f"Unknown attention implementation: {config._attn_implementation}")
+self.attention = attention_class(config, layer_idx)""",
+        ),
         # Add hook points in __init__
         (
             """self.mlp = GPTNeoXMLP(config)""",
@@ -376,7 +395,7 @@ self.post_attention_layernorm.hook_normalized = HookPoint()
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
             )""",
-            """residual = self.hook_resid_pre(hidden_states)
+            """hidden_states = self.hook_resid_pre(hidden_states)
 attention_layer_outputs = self.attention(
     self.input_layernorm.hook_normalized(self.input_layernorm(hidden_states)),
     attention_mask=attention_mask,
@@ -395,12 +414,6 @@ attention_layer_outputs = self.attention(
             """attn_output = attention_layer_outputs[0]
 attn_output = self.hook_attn_out(attn_output)""",
         ),
-#         (
-#             """attn_output = self.post_attention_dropout(attn_output)""",
-#             """attn_output = self.post_attention_dropout(attn_output)
-# hidden_states = attn_output + residual
-# hidden_states = self.hook_resid_mid(hidden_states)""",
-#         ),
         # Wrap MLP inputs and outputs
         (
             """mlp_output = self.mlp(self.post_attention_layernorm(hidden_states))""",

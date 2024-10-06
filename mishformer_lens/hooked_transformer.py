@@ -80,22 +80,15 @@ def map_pythia_module_names(name: str) -> str:
                 return f'blocks.{layer_num}.ln1.hook_normalized'
             elif rest == 'post_attention_layernorm.hook_normalized':
                 return f'blocks.{layer_num}.ln2.hook_normalized'
+            elif rest.startswith('attention.hook_'):
+                attn_hook = rest.split('hook_')[1]
+                return f'blocks.{layer_num}.attn.hook_{attn_hook}'
             elif rest == 'mlp.hook_pre':
                 return f'blocks.{layer_num}.mlp.hook_pre'
             elif rest == 'mlp.hook_post':
                 return f'blocks.{layer_num}.mlp.hook_post'
-            elif rest == 'hook_resid_pre':
-                return f'blocks.{layer_num}.hook_resid_pre'
-            elif rest == 'hook_resid_mid':
-                return f'blocks.{layer_num}.hook_resid_mid'
-            elif rest == 'hook_resid_post':
-                return f'blocks.{layer_num}.hook_resid_post'
-            elif rest == 'hook_mlp_in':
-                return f'blocks.{layer_num}.hook_mlp_in'
-            elif rest == 'hook_mlp_out':
-                return f'blocks.{layer_num}.hook_mlp_out'
-            elif rest == 'hook_attn_out':
-                return f'blocks.{layer_num}.hook_attn_out'
+            elif rest.startswith('hook_'):
+                return f'blocks.{layer_num}.{rest}'
         else:
             raise ValueError(f"Cannot map name '{name}' (no 'hook' substring)")
 

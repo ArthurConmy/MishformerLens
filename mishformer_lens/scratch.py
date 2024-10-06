@@ -21,6 +21,7 @@ torch.set_grad_enabled(False)
 # Other necessary imports
 import gc
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import mishformer_lens
 from mishformer_lens import HookedTransformer
 from mishformer_lens import hooked_transformer as hooked_transformer_lib
 # Ensure CUDA is available
@@ -29,12 +30,32 @@ assert torch.cuda.is_available(), "CUDA is not available. Please use a GPU runti
 from transformer_lens import HookedTransformer as TLHookedTransformer
 
 DEVICE = "cuda"
+MY_STRING = "Hello, world!"
+DTYPE = torch.float32
 
 #%%
 
-tl_model = TLHookedTransformer.from_pretrained("EleutherAI/pythia-70m", device=DEVICE)
-tl_model.set_use_hook_mlp_in(True)
-print(tl_model.hook_dict.keys())
+# Use the context manager to disable patching temporarily
+with mishformer_lens.ast_patching_disabled():
+    tl_model = TLHookedTransformer.from_pretrained("EleutherAI/pythia-70m", device=DEVICE)
+    tl_model.set_use_hook_mlp_in(True)
+    tokens = tl_model.to_tokens(MY_STRING, prepend_bos=True).to(DEVICE)
+    tl_raw_logits = tl_model(tokens)[0]
+    tl_logits, tl_cache = tl_model.run_with_cache(tokens)
+
+# Patching is automatically re-enabled after the with block
+
+# Now you can continue with the rest of your notebook code
+# The patchers will be enabled again here
+
+#%%
+
+with mishformer_lens.ast_patching_disabled():
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        "EleutherAI/pythia-70m",
+        torch_dtype=DTYPE,
+    ).to(DEVICE)
+    hf_raw_logits = hf_model(tokens)[0]
 
 #%%
 
@@ -60,103 +81,18 @@ def check_performance(tl_model, hf_model, margin):
 
 #%%
 
-# Test the function
-pythia_named_modules = ['_ast_patched_hf_model.' + s for s in [
-    '', 'gpt_neox', 'gpt_neox.embed_in', 'gpt_neox.emb_dropout', 'gpt_neox.layers', 'gpt_neox.layers.0', 
-    'gpt_neox.layers.0.input_layernorm', 'gpt_neox.layers.0.input_layernorm.hook_normalized', 
-    'gpt_neox.layers.0.post_attention_layernorm', 'gpt_neox.layers.0.post_attention_layernorm.hook_normalized', 
-    'gpt_neox.layers.0.post_attention_dropout', 'gpt_neox.layers.0.post_mlp_dropout', 
-    'gpt_neox.layers.0.attention', 'gpt_neox.layers.0.attention.rotary_emb', 
-    'gpt_neox.layers.0.attention.query_key_value', 'gpt_neox.layers.0.attention.dense', 
-    'gpt_neox.layers.0.attention.attention_dropout', 'gpt_neox.layers.0.mlp', 
-    'gpt_neox.layers.0.mlp.dense_h_to_4h', 'gpt_neox.layers.0.mlp.dense_4h_to_h', 
-    'gpt_neox.layers.0.mlp.hook_pre', 'gpt_neox.layers.0.mlp.hook_post', 'gpt_neox.layers.0.mlp.act', 
-    'gpt_neox.layers.0.hook_resid_pre', 'gpt_neox.layers.0.hook_resid_mid', 
-    'gpt_neox.layers.0.hook_resid_post', 'gpt_neox.layers.0.hook_mlp_in', 
-    'gpt_neox.layers.0.hook_mlp_out', 'gpt_neox.layers.0.hook_attn_out', 
-    'gpt_neox.final_layer_norm', 'gpt_neox.final_layer_norm.hook_normalized', 
-    'gpt_neox.final_layer_norm.hook_scale', 'gpt_neox.hook_embed', 'gpt_neox.rotary_emb', 'embed_out'
-]]
-
-for module_name in pythia_named_modules:
-    try:
-        mapped_name = hooked_transformer_lib.map_pythia_module_names(module_name)
-    except ValueError as e:
-        assert 'hook' not in module_name, f"Error: {e}"
-    else:
-        assert 'hook' in module_name, module_name
-
-#%%
-
-dtype = torch.float32
-model = HookedTransformer.from_pretrained_no_processing("EleutherAI/pythia-70m", torch_dtype=dtype)
-
-#%%
-
-logits, cache = model.run_with_cache("Hello, world!")
-
-#%%
-
-tl_logits, tl_cache = tl_model.run_with_cache("Hello, world!")
-
-#%%
-
-torch.testing.assert_close(logits, tl_logits) # lol
-
-#%%
-
-# Check if the keys in cache are the same as in tl_cache
-cache_keys = set(cache.keys())
-tl_cache_keys = set(tl_cache.keys())
-
-if cache_keys != tl_cache_keys:
-    print("The cache keys are different.")
-    print("Keys in cache but not in tl_cache:")
-    print(cache_keys - tl_cache_keys)
-    print("Keys in tl_cache but not in cache:")
-    print(tl_cache_keys - cache_keys)
-else:
-    print("The cache keys are the same in both caches.")
-
-# Print the number of keys in each cache
-print(f"Number of keys in cache: {len(cache_keys)}")
-print(f"Number of keys in tl_cache: {len(tl_cache_keys)}")
-
-
-#%%
-# For low precision, the processing is not advised.
-hf_model = AutoModelForCausalLM.from_pretrained(
+model = HookedTransformer.from_pretrained_no_processing(
     "EleutherAI/pythia-70m",
-    torch_dtype=dtype,
-).to(DEVICE)
-
-def check_logits(margin):
-    """Check the loading and inferences for different dtypes."""
-    print(f"\nChecking EleutherAI/pythia-70m with dtype {dtype}")
-
-    for layer_name, layer in model.state_dict().items():
-        assert layer.dtype in [dtype, torch.bool] or "IGNORE" in layer_name, f"Layer {layer_name} has incorrect dtype {layer.dtype}"
-
-    check_performance(model, hf_model, margin)
+    torch_dtype=DTYPE,
+    # attn_implementation='eager',
+)
 
 #%%
 
-check_logits(margin=1e-9)
+logits, cache = model.run_with_cache(tokens)
 
 #%%
 
-# Add no-op hooks and test the same thing
-hook_names = model.hook_dict.keys()
-no_op_hook = lambda x, hook: x * 1.0
-
-try:
-    for hook_name in hook_names:
-        model.add_hook(hook_name, no_op_hook)
-
-    check_logits(margin=1e-9)
-finally:
-    model.reset_hooks()
-# It's still fine
+torch.testing.assert_close(logits, hf_raw_logits)
 
 #%%
-
