@@ -14,6 +14,8 @@ TODO(v0.1): write this up in full
 
 v0.1: make this usable for most TransformerLens models, including everything upstreamed to TL.
 
+Models we want support for: `Pythia`, `Gemma`. `Llama`?
+
 v1: PyPI, full testing, library ready for development.
 
 # Installation notes

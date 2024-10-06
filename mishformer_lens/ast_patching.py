@@ -23,8 +23,8 @@ import einops
             # # o1 preview is wrong here:
             # GPT2MLP=1,
             # GPT2Model=1,
-            GPT2Attention=2,
             # GPT2LayerNorm=1,
+            GPT2Attention=2,
         ),
     ),
     # Patching GPT2Model to add hooks for embeddings and final layer norm
@@ -167,6 +167,7 @@ self.hook_z = HookPoint(input_callable = einops_rearrange_factory("batch head_in
 # N.B. these are likely not supported:
 self.hook_attn_scores = HookPoint()
 self.hook_pattern = HookPoint()
+# TODO(v1): add support for attn_result:
 self.hook_result = HookPoint()
 """,
         ),
@@ -264,6 +265,161 @@ feed_forward_hidden_states = self.hook_mlp_out(feed_forward_hidden_states)
             """hidden_states = residual + feed_forward_hidden_states
 hidden_states = self.hook_resid_post(hidden_states)
 """,
+        ),
+    ],
+))
+
+
+register_patcher(ast_patcher.ModuleASTPatcher(
+    transformers.models.gpt_neox.modeling_gpt_neox,
+    ast_patcher.PatchSettings(
+        prefix="""from transformer_lens.hook_points import HookPoint
+from mishformer_lens.ast_patching_utils import layer_norm_scale, einops_rearrange_factory
+import einops
+""",
+        allow_num_matches_upto=dict(),
+    ),
+    GPTNeoXModel=[
+        # Add hook points in __init__
+        (
+            """self.final_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)""",
+            """self.final_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+self.hook_embed = HookPoint()
+self.final_layer_norm.hook_normalized = HookPoint()
+self.final_layer_norm.hook_scale = HookPoint()
+""",
+        ),
+        # Wrap embeddings with hooks in forward
+        (
+            """inputs_embeds = self.embed_in(input_ids)""",
+            """inputs_embeds = self.hook_embed(self.embed_in(input_ids))""",
+        ),
+        # Wrap final layer norm with hooks
+        (
+            """hidden_states = self.final_layer_norm(hidden_states)""",
+            """manually_computed_layer_norm_scale = layer_norm_scale(hidden_states, self.final_layer_norm.eps)
+should_be_no_op_layer_norm_scale = self.final_layer_norm.hook_scale(manually_computed_layer_norm_scale)
+torch.testing.assert_allclose(should_be_no_op_layer_norm_scale, manually_computed_layer_norm_scale, atol=1e-3, rtol=1e-3)
+hidden_states = self.final_layer_norm.hook_normalized(self.final_layer_norm(hidden_states))""",
+        ),
+    ],
+    GPTNeoXAttention=[
+        # Add hook points in __init__
+        (
+            """self.dense = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)""",
+            """self.dense = nn.Linear(config.hidden_size, config.hidden_size, bias=config.attention_bias)
+self.hook_q = HookPoint(input_callable=einops_rearrange_factory("batch head pos d_head -> batch pos head d_head"), output_callable=einops_rearrange_factory("batch pos head d_head -> batch head pos d_head"))
+self.hook_k = HookPoint(input_callable=einops_rearrange_factory("batch head pos d_head -> batch pos head d_head"), output_callable=einops_rearrange_factory("batch pos head d_head -> batch head pos d_head"))
+self.hook_v = HookPoint(input_callable=einops_rearrange_factory("batch head pos d_head -> batch pos head d_head"), output_callable=einops_rearrange_factory("batch pos head d_head -> batch head pos d_head"))
+self.hook_z = HookPoint(input_callable=einops_rearrange_factory("batch head pos d_head -> batch pos head d_head"), output_callable=einops_rearrange_factory("batch pos head d_head -> batch head pos d_head"))
+self.hook_attn_scores = HookPoint()
+self.hook_pattern = HookPoint()
+self.hook_result = HookPoint()
+""",
+        ),
+        # In forward, wrap q, k, v with hooks
+        (
+            """query = qkv[..., : self.head_size].permute(0, 2, 1, 3)
+key = qkv[..., self.head_size : 2 * self.head_size].permute(0, 2, 1, 3)
+value = qkv[..., 2 * self.head_size :].permute(0, 2, 1, 3)""",
+            """query = self.hook_q(query)
+key = self.hook_k(key)
+value = self.hook_v(value)
+""",
+        ),
+        # Hook after attention output
+        (
+            """attn_output = self._merge_heads(attn_output, self.num_attention_heads, self.head_size)""",
+            """attn_output = self.hook_z(self._merge_heads(attn_output, self.num_attention_heads, self.head_size))""",
+        ),
+    ],
+    GPTNeoXMLP=[
+        # Add hook_post and hook_pre in __init__
+        (
+            """self.dense_4h_to_h = nn.Linear(config.intermediate_size, config.hidden_size)""",
+            """self.dense_4h_to_h = nn.Linear(config.intermediate_size, config.hidden_size)
+self.hook_pre = HookPoint()
+self.hook_post = HookPoint()
+""",
+        ),
+        # Wrap activation function with hooks
+        (
+            """hidden_states = self.act(hidden_states)""",
+            """hidden_states = self.hook_post(self.act(self.hook_pre(hidden_states)))""",
+        ),
+    ],
+    GPTNeoXLayer=[
+        # Add hook points in __init__
+        (
+            """self.mlp = GPTNeoXMLP(config)""",
+            """self.mlp = GPTNeoXMLP(config)
+self.hook_resid_pre = HookPoint()
+self.hook_resid_mid = HookPoint()
+self.hook_resid_post = HookPoint()
+self.hook_mlp_in = HookPoint()
+self.hook_mlp_out = HookPoint()
+self.hook_attn_out = HookPoint()
+self.input_layernorm.hook_normalized = HookPoint()
+self.post_attention_layernorm.hook_normalized = HookPoint()
+""",
+        ),
+        # Wrap hidden_states with hooks in forward
+        (
+            """attention_layer_outputs = self.attention(
+                self.input_layernorm(hidden_states),
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                layer_past=layer_past,
+                head_mask=head_mask,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+            )""",
+            """residual = self.hook_resid_pre(hidden_states)
+attention_layer_outputs = self.attention(
+    self.input_layernorm.hook_normalized(self.input_layernorm(hidden_states)),
+    attention_mask=attention_mask,
+    position_ids=position_ids,
+    layer_past=layer_past,
+    head_mask=head_mask,
+    use_cache=use_cache,
+    output_attentions=output_attentions,
+    cache_position=cache_position,
+    position_embeddings=position_embeddings,
+)""",
+        ),
+        # After self.attention
+        (
+            """attn_output = attention_layer_outputs[0]""",
+            """attn_output = attention_layer_outputs[0]
+attn_output = self.hook_attn_out(attn_output)""",
+        ),
+        (
+            """attn_output = self.post_attention_dropout(attn_output)""",
+            """attn_output = self.post_attention_dropout(attn_output)
+hidden_states = attn_output + residual
+hidden_states = self.hook_resid_mid(hidden_states)""",
+        ),
+        # Wrap MLP inputs and outputs
+        (
+            """mlp_output = self.mlp(self.post_attention_layernorm(hidden_states))""",
+            """mlp_output = self.mlp(self.post_attention_layernorm.hook_normalized(self.post_attention_layernorm(self.hook_mlp_in(hidden_states))))
+mlp_output = self.hook_mlp_out(mlp_output)""",
+        ),
+        (
+            """mlp_output = self.post_mlp_dropout(mlp_output)
+hidden_states = mlp_output + attn_output + hidden_states""",
+            """mlp_output = self.post_mlp_dropout(mlp_output)
+hidden_states = mlp_output + attn_output + hidden_states
+hidden_states = self.hook_resid_post(hidden_states)""",
+        ),
+        (
+            """mlp_output = self.post_mlp_dropout(mlp_output)
+hidden_states = mlp_output + attn_output""",
+            """mlp_output = self.post_mlp_dropout(mlp_output)
+hidden_states = mlp_output + attn_output
+hidden_states = self.hook_resid_post(hidden_states)""",
         ),
     ],
 ))

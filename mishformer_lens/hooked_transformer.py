@@ -42,7 +42,7 @@ DTYPE_FROM_STRING = {
 }
 # END COPY PASTE
 
-def tl_module_name_from_hf_module_name(name: str) -> str:
+def map_gpt2_module_names(name: str) -> str:
     if name == '_ast_patched_hf_model.transformer.hook_embed':
         mapped_name = 'hook_embed'
     elif name == '_ast_patched_hf_model.transformer.hook_pos_embed':
@@ -57,7 +57,56 @@ def tl_module_name_from_hf_module_name(name: str) -> str:
     
     # Apply substitutions and return
     return mapped_name.replace('ln_1', 'ln1').replace('ln_2', 'ln2')    
+
+# TODO(v0.1): frankenstein of model commits; refactor this
+def map_pythia_module_names(name: str) -> str:
+    if not name.startswith('_ast_patched_hf_model.'):
+        raise ValueError(f"Cannot map name '{name}'")
+    name = name[len('_ast_patched_hf_model.'):]
+
+    if name == '' or name == 'gpt_neox' or name == 'embed_out':
+        raise ValueError(f"Cannot map name '{name}'")
+
+    if name == 'gpt_neox.hook_embed':
+        return 'hook_embed'
     
+    if name.startswith('gpt_neox.layers.'):
+        parts = name.split('.')
+        layer_num = parts[2]
+        rest = '.'.join(parts[3:])
+
+        if 'hook' in rest:
+            if rest == 'input_layernorm.hook_normalized':
+                return f'blocks.{layer_num}.ln1.hook_normalized'
+            elif rest == 'post_attention_layernorm.hook_normalized':
+                return f'blocks.{layer_num}.ln2.hook_normalized'
+            elif rest == 'mlp.hook_pre':
+                return f'blocks.{layer_num}.mlp.hook_pre'
+            elif rest == 'mlp.hook_post':
+                return f'blocks.{layer_num}.mlp.hook_post'
+            elif rest == 'hook_resid_pre':
+                return f'blocks.{layer_num}.hook_resid_pre'
+            elif rest == 'hook_resid_mid':
+                return f'blocks.{layer_num}.hook_resid_mid'
+            elif rest == 'hook_resid_post':
+                return f'blocks.{layer_num}.hook_resid_post'
+            elif rest == 'hook_mlp_in':
+                return f'blocks.{layer_num}.hook_mlp_in'
+            elif rest == 'hook_mlp_out':
+                return f'blocks.{layer_num}.hook_mlp_out'
+            elif rest == 'hook_attn_out':
+                return f'blocks.{layer_num}.hook_attn_out'
+        else:
+            raise ValueError(f"Cannot map name '{name}' (no 'hook' substring)")
+
+    if 'hook' in name and name.startswith('gpt_neox.final_layer_norm'):
+        if name == 'gpt_neox.final_layer_norm.hook_normalized':
+            return 'ln_final.hook_normalized'
+        elif name == 'gpt_neox.final_layer_norm.hook_scale':
+            return 'ln_final.hook_scale'
+
+    raise ValueError(f"Cannot map name '{name}'")
+
 class HookedTransformer(TransformerLensHookedTransformer):
     def __init__(
         self,
@@ -76,7 +125,14 @@ class HookedTransformer(TransformerLensHookedTransformer):
         )
         self._ast_patched_hf_model = ast_patched_hf_model
         # N.B. there's an internal TransformerLens .setup() already called, that does nothing
-        self.setup(naming_transformation=tl_module_name_from_hf_module_name)
+        print([name for name, _ in self._ast_patched_hf_model.named_modules()])
+        if self.cfg.model_name.startswith('pythia'):
+            naming_transformation = map_pythia_module_names
+        elif self.cfg.model_name.startswith('gpt2'):
+            naming_transformation = map_gpt2_module_names
+        else:
+            raise ValueError(f"Model name {self.cfg.model_name} not supported")
+        self.setup(naming_transformation=naming_transformation)
 
     @classmethod
     def from_pretrained(
@@ -192,7 +248,7 @@ class HookedTransformer(TransformerLensHookedTransformer):
         prepend_bos: Optional[Union[bool, None]] = transformer_lens_utils.USE_DEFAULT_VALUE,
         padding_side: Optional[Literal["left", "right"]] = transformer_lens_utils.USE_DEFAULT_VALUE,
         start_at_layer: Optional[int] = None,
-        tokens: Optional[Int[torch.Tensor, "batch pos"]] = None,  # TODO(v0): WTF is this?
+        tokens: Optional[Int[torch.Tensor, "batch pos"]] = None,  # TODO(v0.1): WTF is this?
         shortformer_pos_embed: Optional[Float[torch.Tensor, "batch pos d_model"]] = None,
         attention_mask: Optional[torch.Tensor] = None,  # [batch pos]
         stop_at_layer: Optional[int] = None,
@@ -205,7 +261,7 @@ class HookedTransformer(TransformerLensHookedTransformer):
     ]:
         assert start_at_layer is None and stop_at_layer is None, "MishformerLens does not support start and stop at layer"
         assert attention_mask is None, "MishformerLens does not support attention_mask passed to forward(...)"
-        assert past_kv_cache is None, "MishformerLens does not support past_kv_cache passed to forward(...)"
+        assert past_kv_cache is None, "TODO(v0.1): MishformerLens does not support past_kv_cache passed to forward(...)"
         assert shortformer_pos_embed is None, "MishformerLens does not support shortformer_pos_embed passed to forward(...)"
 
         with transformer_lens_utils.LocallyOverridenDefaults(
