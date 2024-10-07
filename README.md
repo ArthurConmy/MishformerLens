@@ -6,7 +6,7 @@ MishformerLens is currently highly experimental and at version 0.0.x.
 
 Status as of 5th October: https://www.diffchecker.com/TaW9IAhJ shows the difference between `https://colab.research.google.com/github/neelnanda-io/TransformerLens/blob/main/demos/Exploratory_Analysis_Demo.ipynb` and `MishformerLens/mishformer_lens/mishformer_lens_expoloratory_analysis_demo.py` -- it's basically just formatting.
 
-Note that we only have support for GPT-2, and no fold LN etc. stuff, just `from_pretrained_no_preprocessing` basically. It should be pretty easy to add fold LN etc. (with a small risk of numerical problems), and will be a lot harder to add support for every single model family.
+Note that we only have support for GPT-2 and Pythia (and GPT Neo-X), and no fold LN etc. stuff, just `from_pretrained_no_preprocessing` basically. It should be pretty easy to add fold LN etc. (with a small risk of numerical problems), and will be a lot harder to add support for every single model family.
 
 TODO(v0.1): write this up in full
 
